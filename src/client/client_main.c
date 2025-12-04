@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include "../../include/common/protocol.h"
 
+FILE *recv_fp = NULL; // 파일을 받을 때 쓸 파일 포인터
+
 // --- 전역 변수 (GUI 위젯 및 소켓) ---
 GtkWidget *window;
 GtkWidget *txt_view;      // 채팅 내용 표시
@@ -23,6 +25,84 @@ typedef struct {
     char name[NAME_SIZE];
     char msg[BUF_SIZE];
 } ChatData;
+
+// 파일을 쪼개서 보내는 스레드 함수
+void *send_file_thread_func(void *arg) {
+    char *filepath = (char *)arg;
+    char *filename = strrchr(filepath, '/'); // 경로에서 파일명만 추출
+    if (filename) filename++;
+    else filename = filepath;
+
+    FILE *fp = fopen(filepath, "rb"); // 바이너리 읽기 모드
+    if (!fp) {
+        perror("File open error");
+        return NULL;
+    }
+
+    // 1. START 패킷 전송 (파일명)
+    Packet p;
+    p.type = REQ_FILE_START;
+    p.room_id = 0;
+    strcpy(p.name, gtk_entry_get_text(GTK_ENTRY(entry_name)));
+    strcpy(p.data, filename); // 데이터 영역에 파일명을 담음
+    p.data_len = strlen(filename);
+    write(sock, &p, sizeof(Packet));
+    
+    // 약간의 딜레이 (패킷 순서 꼬임 방지)
+    usleep(10000); 
+
+    // 2. DATA 패킷 전송 (파일 내용)
+    while (!feof(fp)) {
+        int read_len = fread(p.data, 1, BUF_SIZE, fp);
+        if (read_len > 0) {
+            p.type = REQ_FILE_DATA;
+            p.data_len = read_len; // 읽은 만큼만 길이 설정
+            write(sock, &p, sizeof(Packet));
+            usleep(1000); // 전송 속도 조절 (플러딩 방지)
+        }
+    }
+
+    // 3. END 패킷 전송
+    p.type = REQ_FILE_END;
+    p.data_len = 0;
+    write(sock, &p, sizeof(Packet));
+
+    fclose(fp);
+    free(filepath); // 동적 할당된 경로 메모리 해제
+
+    // GUI에 "전송 완료" 알림 (g_idle_add 사용)
+    ChatData *info = (ChatData*)malloc(sizeof(ChatData));
+    strcpy(info->name, "SYSTEM");
+    sprintf(info->msg, "File sent: %s", filename);
+    g_idle_add(update_chat_ui, info);
+
+    return NULL;
+}
+
+// "파일 전송" 버튼 클릭 시 호출
+void on_file_btn_clicked(GtkWidget *widget, gpointer data) {
+    GtkWidget *dialog;
+    dialog = gtk_file_chooser_dialog_new("Select File",
+                                         GTK_WINDOW(window),
+                                         GTK_FILE_CHOOSER_ACTION_OPEN,
+                                         "Cancel", GTK_RESPONSE_CANCEL,
+                                         "Open", GTK_RESPONSE_ACCEPT,
+                                         NULL);
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filepath = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        
+        // 스레드 생성하여 전송 (GUI 프리징 방지)
+        pthread_t t_id;
+        // filepath는 스레드 안에서 free 해야 함
+        char *path_copy = strdup(filepath); 
+        pthread_create(&t_id, NULL, send_file_thread_func, path_copy);
+        pthread_detach(t_id);
+        
+        g_free(filepath);
+    }
+    gtk_widget_destroy(dialog);
+}
 
 // --------------------------------------------------------
 // 1. GUI 업데이트 함수 (메인 스레드에서 실행됨)
@@ -69,15 +149,47 @@ void *recv_thread(void *arg) {
             break;
         }
 
-        if (packet.type == REQ_CHAT) {
-            // 데이터를 힙에 복사하여 GUI 스레드로 전달
-            ChatData *chat = (ChatData*)malloc(sizeof(ChatData));
-            strcpy(chat->name, packet.name);
-            strcpy(chat->msg, packet.data);
-            
-            // ★ 중요: 백그라운드 스레드에서 직접 GUI를 건드리면 안 됨!
-            // g_idle_add를 통해 메인 루프에 작업을 예약함.
-            g_idle_add(update_chat_ui, chat);
+        switch (packet.type) {
+            case REQ_CHAT: {
+                ChatData *chat = (ChatData*)malloc(sizeof(chatData));
+                strcpy(chat->name, packet.name);
+                strcpy(chat->msg, packet.data);
+                g_idle_add(update_chat_ui, chat);
+                break;
+            }
+
+            case REQ_FILE_START: {
+                char save_name[BUF_SIZE];
+                sprintf(save_name, "down_%s", packet.data);
+
+                recv_fp = fopen(save_name, "wb");
+
+                ChatData *info = (ChatData*)malloc(sizeof(ChatData));
+                strcpy(info->name, "SYSTEM");
+                sprintf(info->msg, "Receiving file: %s..", packet.data);
+                g_idle_add(update_chat_ui, info);
+                break;
+            }
+
+            case REQ_FILE_DATA: {
+                if (recv_fp != NULL) {
+                    fwrite(packet.data, 1, packet.data_len, recv_fp);
+                }
+                break;
+            }
+
+            case REQ_FILE_END: {
+                if (recv_fp != NULL) {
+                    fclose(recv_fp);
+                    recv_fp = NULL;
+
+                    ChatData *info = (ChatData)malloc(sizeof(ChatData));
+                    strcpy(info->name, "SYSTEM");
+                    strcpy(info->msg, "File download complete");
+                    g_idle_add(update_chat_ui, info);
+                }
+                break;
+            }
         }
     }
     return NULL;
@@ -195,12 +307,17 @@ int main(int argc, char *argv[]) {
     gtk_entry_set_placeholder_text(GTK_ENTRY(entry_msg), "Type message...");
     GtkWidget *btn_send = gtk_button_new_with_label("Send");
 
+    GtkWidget *btn_file = gtk_button_new_with_label("Send File"); 
+    GtkWidget *btn_send = gtk_button_new_with_label("Send");
+
     gtk_box_pack_start(GTK_BOX(hbox_bottom), entry_msg, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(hbox_bottom), btn_file, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(hbox_bottom), btn_send, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), hbox_bottom, FALSE, FALSE, 5);
 
     // 시그널 연결
     g_signal_connect(btn_connect, "clicked", G_CALLBACK(on_connect_clicked), NULL);
+    g_signal_connect(btn_file, "clicked", G_CALLBACK(on_file_btn_clicked), NULL);
     g_signal_connect(btn_send, "clicked", G_CALLBACK(on_send_clicked), NULL);
     g_signal_connect(entry_msg, "activate", G_CALLBACK(on_send_clicked), NULL); // 엔터키 처리
 
