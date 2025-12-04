@@ -151,6 +151,24 @@ int main() {
                                     }
                                 }
                                 break;
+                            
+                            case REQ_FILE_START:
+                            case REQ_FILE_DATA:
+                            case REQ_FILE_END:
+                                if (recv_packet.type == REQ_FILE_START) {
+                                    printf("[FILE] Start transfer: %s from %s\n", recv_packet.data, clients[idx].name);
+                                } else if (recv_packet.type == REQ_FILE_END) {
+                                    printf("[FILE] Transfer complete from %s\n", clients[idx].name);
+                                }
+
+                                send_packet = recv_packet;
+                                for (j = 0; j < MAX_CLIENTS; j++) {
+                                    if (clients[j].sock != -1 && clients[j].sock != i && 
+                                        clients[j].room_id == clients[idx].room_id) {
+                                        write(clients[j].sock, &send_packet, sizeof(Packet));  
+                                    }
+                                }
+                                break;
                         }
                     }
                 }

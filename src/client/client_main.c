@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "../../include/common/protocol.h"
+gboolean update_chat_ui(gpointer data);
 
 FILE *recv_fp = NULL; // 파일을 받을 때 쓸 파일 포인터
 
@@ -151,7 +152,7 @@ void *recv_thread(void *arg) {
 
         switch (packet.type) {
             case REQ_CHAT: {
-                ChatData *chat = (ChatData*)malloc(sizeof(chatData));
+                ChatData *chat = (ChatData*)malloc(sizeof(ChatData));
                 strcpy(chat->name, packet.name);
                 strcpy(chat->msg, packet.data);
                 g_idle_add(update_chat_ui, chat);
@@ -183,7 +184,7 @@ void *recv_thread(void *arg) {
                     fclose(recv_fp);
                     recv_fp = NULL;
 
-                    ChatData *info = (ChatData)malloc(sizeof(ChatData));
+                    ChatData *info = (ChatData*)malloc(sizeof(ChatData));
                     strcpy(info->name, "SYSTEM");
                     strcpy(info->msg, "File download complete");
                     g_idle_add(update_chat_ui, info);
@@ -308,7 +309,6 @@ int main(int argc, char *argv[]) {
     GtkWidget *btn_send = gtk_button_new_with_label("Send");
 
     GtkWidget *btn_file = gtk_button_new_with_label("Send File"); 
-    GtkWidget *btn_send = gtk_button_new_with_label("Send");
 
     gtk_box_pack_start(GTK_BOX(hbox_bottom), entry_msg, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(hbox_bottom), btn_file, FALSE, FALSE, 0);
