@@ -1,8 +1,10 @@
 #include <gtk/gtk.h>
 #include "client_vars.h"
 #include "client_ui.h"
+#include <locale.h>
 
 int main(int argc, char *argv[]) {
+    setlocale(LC_ALL, "");
     gtk_init(&argc, &argv);
 
     window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
